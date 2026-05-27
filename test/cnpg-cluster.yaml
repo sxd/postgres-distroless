@@ -1,0 +1,31 @@
+# Minimal CNPG Cluster CR used by smoke.sh to verify that the distroless image
+# actually runs end-to-end under the operator.
+#
+# IMPORTANT: smoke.sh replaces __IMAGE__, __CLUSTER_NAME__, and __NAMESPACE__
+# before applying this manifest.
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: __CLUSTER_NAME__
+  namespace: __NAMESPACE__
+spec:
+  instances: 1
+  imageName: __IMAGE__
+  imagePullPolicy: Never
+
+  postgresql:
+    parameters:
+      shared_buffers: "128MB"
+      max_connections: "20"
+
+  bootstrap:
+    initdb:
+      database: app
+      owner: app
+      encoding: UTF8
+      locale: C
+      localeProvider: icu
+      icuLocale: en-US-x-icu
+
+  storage:
+    size: 1Gi

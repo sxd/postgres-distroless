@@ -1,0 +1,33 @@
+name: Grype scan image
+description: Scan a local image with the repository Grype policy.
+
+inputs:
+  image:
+    description: Image reference to scan.
+    required: true
+  config:
+    description: Grype config path.
+    required: false
+    default: .grype.yaml
+  severity-cutoff:
+    description: Minimum severity that fails the scan.
+    required: false
+    default: critical
+  only-fixed:
+    description: Only fail on vulnerabilities with an available fix.
+    required: false
+    default: "true"
+
+runs:
+  using: composite
+  steps:
+    - name: Scan image with Grype
+      uses: anchore/scan-action@v7
+      with:
+        image: ${{ inputs.image }}
+        config: ${{ inputs.config }}
+        fail-build: true
+        severity-cutoff: ${{ inputs.severity-cutoff }}
+        only-fixed: ${{ inputs.only-fixed }}
+        output-format: table
+        cache-db: true

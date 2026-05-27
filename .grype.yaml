@@ -1,0 +1,3 @@
+# The final image is FROM scratch, so it intentionally has no /etc/os-release.
+# Tell Grype which distro security feed applies to the copied runtime packages.
+distro: debian:13

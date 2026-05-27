@@ -1,0 +1,389 @@
+# postgres-distroless
+
+[![Build](https://github.com/sxd/postgres-distroless/actions/workflows/build.yml/badge.svg?branch=main)](https://github.com/sxd/postgres-distroless/actions/workflows/build.yml)
+[![Test](https://github.com/sxd/postgres-distroless/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/sxd/postgres-distroless/actions/workflows/test.yml)
+[![Security Scan](https://github.com/sxd/postgres-distroless/actions/workflows/security-scan.yml/badge.svg?branch=main)](https://github.com/sxd/postgres-distroless/actions/workflows/security-scan.yml)
+[![Publish](https://github.com/sxd/postgres-distroless/actions/workflows/publish.yml/badge.svg?branch=main)](https://github.com/sxd/postgres-distroless/actions/workflows/publish.yml)
+
+Distroless PostgreSQL 16, 17, and 18 images for CloudNativePG.
+
+The badges above point at the upstream repository. If you fork this project and
+want README badges for your fork, replace `sxd/postgres-distroless` in the badge
+URLs with your `<owner>/<repo>`.
+
+This repository builds PostgreSQL from upstream source, copies only the runtime
+filesystem needed by CloudNativePG, and publishes a `FROM scratch` final image.
+It is intentionally small, but it is not a shell-free image: PostgreSQL runtime
+tools call `popen()`/`system()` in places, so `/bin/sh` is included via Debian's
+`dash`.
+
+## Why Distroless For Kubernetes Operands
+
+Database operand images should contain the software needed to run the database,
+not a general-purpose Linux environment. In Kubernetes, the image is usually
+started, configured, probed, backed up, and upgraded by an operator. For this
+project that operator is CloudNativePG, so the container only needs PostgreSQL
+runtime files and the small set of OS runtime pieces PostgreSQL actually uses.
+
+A distroless image helps in several practical ways:
+
+- Smaller attack surface: no package manager, shell tooling, editors, service
+  managers, or unrelated utilities are available for an attacker to reuse after
+  a compromise.
+- Cleaner vulnerability signal: scanners report fewer unrelated distribution
+  CVEs because the image does not carry broad OS packages that PostgreSQL never
+  executes.
+- More reviewable runtime contract: every file copied into the image has to be
+  justified, and `test/check-no-extras.sh` enforces that contract.
+- Better operator fit: CloudNativePG invokes PostgreSQL binaries directly and
+  owns orchestration concerns such as init, lifecycle, backups, and failover.
+  The image does not need to behave like a bootable host.
+- Lower drift: fewer packages means fewer surprise behavior changes from tools
+  that are not part of the database runtime path.
+
+This image is still pragmatic rather than minimal at any cost. It includes
+`/bin/sh`, NSS DNS/files modules, tzdata, and fixed passwd/group entries because
+PostgreSQL and CloudNativePG need those pieces at runtime. The goal is not to
+remove every familiar file; it is to keep only the files with a clear operational
+reason to exist.
+
+## Image Contract
+
+The final image contains:
+
+- PostgreSQL binaries under `/usr/lib/postgresql/<major>/bin`.
+- PostgreSQL libraries and share files under `/usr/lib/postgresql/<major>/lib`
+  and `/usr/share/postgresql/<major>`.
+- Shared libraries resolved from the PostgreSQL binaries and extension modules.
+- The architecture-specific dynamic loader.
+- NSS `files` and `dns` modules for hostname resolution.
+- System tzdata and PostgreSQL timezone data.
+- `/bin/dash` plus `/bin/sh`.
+- Static `/etc/passwd`, `/etc/group`, and `/etc/nsswitch.conf` with postgres
+  UID/GID `26:26`.
+- Runtime directories for `PGDATA`, PostgreSQL socket files, and `/tmp`.
+
+The final image does not define `ENTRYPOINT` or `CMD`. CloudNativePG's instance
+manager invokes the PostgreSQL binaries directly.
+
+## Build
+
+`docker-bake.hcl` is the source of truth for version pins, source checksums,
+build arguments, platforms, labels, tags, and output mode. The `pg` target is
+a matrix that currently expands to PostgreSQL 16, 17, and 18 targets:
+`pg-16`, `pg-17`, and `pg-18`.
+
+```sh
+docker buildx bake
+```
+
+The default build targets every configured PostgreSQL version for `linux/amd64`
+and `linux/arm64` and writes only to the BuildKit cache. To load a local amd64
+image for tests:
+
+```sh
+docker buildx bake pg-18 --set pg-18.platform=linux/amd64 --set pg-18.output=type=docker
+```
+
+Equivalent Make targets are available:
+
+```sh
+make build
+make build-local
+make print
+```
+
+Useful overrides:
+
+```sh
+REGISTRY=ghcr.io/your-github-owner IMAGE_NAME=postgres-distroless \
+  docker buildx bake pg-18 --set pg-18.output=type=registry
+```
+
+When bumping PostgreSQL, use the helper below to fetch the upstream checksum and
+update the matching version/checksum entry:
+
+```sh
+make bump-postgres MAJOR=18 VERSION=18.4
+```
+
+## Supply Chain And Security Scanning
+
+The CI pipeline publishes several supply-chain signals for released images:
+
+- Docker BuildKit provenance attestations, generated by `docker buildx bake`
+  with `provenance: mode=max`.
+- Docker BuildKit SBOM attestations, generated by `docker buildx bake` with
+  `sbom: true`.
+- Keyless Cosign signatures over the immutable pushed image digest, generated
+  with GitHub OIDC.
+- SLSA container provenance, generated by the SLSA GitHub Generator against the
+  immutable pushed image digest.
+- Post-publish verification of the Cosign signature, BuildKit SBOM/provenance
+  attestations, SLSA provenance, and multi-platform manifest list.
+- Grype vulnerability scanning in the Test workflow before the CNPG integration
+  tests run.
+
+Published images also carry OCI labels for source repository, Git revision,
+version, license, description, and base image. In GitHub Actions those labels are
+set from the fork that is building the image.
+
+The latest Grype result is visible in the **Security Scan** badge at the top of
+this README. Click the badge to open the latest scan logs and table output.
+
+The Grype scan uses `.grype.yaml` to tell Grype that the copied runtime packages
+come from Debian 13. The final image is `FROM scratch`, so it intentionally does
+not contain `/etc/os-release`.
+
+To reproduce the CI vulnerability scan locally:
+
+```sh
+make build-local
+make scan-image
+```
+
+Or run Grype directly:
+
+```sh
+grype localhost/postgres-distroless:18 \
+  --config .grype.yaml \
+  --only-fixed \
+  --fail-on critical
+```
+
+When Grype reports a fixable vulnerability, update the source of the vulnerable
+runtime file and rebuild:
+
+- If the finding is in a Debian runtime library, rebuild after the fixed package
+  is available in `debian:trixie-slim`; if needed, update `DEBIAN_BASE` to a
+  newer tag or digest.
+- If the finding is in PostgreSQL itself, bump the affected PostgreSQL version
+  and source tarball checksum in `docker-bake.hcl`.
+- If the finding is in an optional PostgreSQL capability, consider disabling the
+  related Meson flag and then regenerate/review `test/expected-files.txt`.
+
+Do not patch the final image in place. The final image is scratch-based; fixes
+come from updating the builder/collector inputs and rebuilding the image.
+
+To inspect the published image digest for SLSA verification:
+
+```sh
+OWNER=your-github-owner
+REPO=postgres-distroless
+IMAGE_NAME=postgres-distroless
+IMAGE="ghcr.io/${OWNER}/${IMAGE_NAME}:18.4"
+DIGEST="$(
+  docker buildx imagetools inspect "${IMAGE}" \
+    --format '{{json .Manifest}}' \
+    | jq -r '.digest'
+)"
+echo "${IMAGE%@*}@${DIGEST}"
+```
+
+To verify the published Cosign signature:
+
+```sh
+OWNER=your-github-owner
+REPO=postgres-distroless
+IMAGE_NAME=postgres-distroless
+IMAGE="ghcr.io/${OWNER}/${IMAGE_NAME}:18.4"
+DIGEST="$(
+  docker buildx imagetools inspect "${IMAGE}" \
+    --format '{{json .Manifest}}' \
+    | jq -r '.digest'
+)"
+
+REPOSITORY="${OWNER}/${REPO}" \
+  scripts/verify-cosign-signature.sh "${IMAGE%@*}@${DIGEST}"
+```
+
+To verify the BuildKit SBOM and provenance attestations:
+
+```sh
+scripts/verify-buildkit-attestations.sh "${IMAGE%@*}@${DIGEST}"
+```
+
+To verify the SLSA provenance for an immutable digest:
+
+```sh
+OWNER=your-github-owner
+REPO=postgres-distroless
+IMAGE_NAME=postgres-distroless
+IMAGE="ghcr.io/${OWNER}/${IMAGE_NAME}"
+DIGEST=sha256:<digest>
+SOURCE_URI="github.com/${OWNER}/${REPO}"
+
+slsa-verifier verify-image "${IMAGE}@${DIGEST}" \
+  --source-uri "${SOURCE_URI}" \
+  --source-branch main \
+  --builder-id \
+    "https://github.com/slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@refs/tags/v2.1.0"
+```
+
+## Build From This Repo With Local Overrides
+
+You can use this repository as the upstream Bake definition and layer your own
+local `docker-bake` file on top. This is useful when you want the tested build
+pipeline from this repository, but need local tags, output settings, or a
+different PostgreSQL Meson feature set.
+
+Create a local override file, for example `docker-bake.override.hcl`:
+
+```hcl
+variable "REGISTRY" {
+  default = "ghcr.io/your-user"
+}
+
+variable "IMAGE_NAME" {
+  default = "postgres-distroless-custom"
+}
+
+target "pg-18" {
+  tags = [
+    "${REGISTRY}/${IMAGE_NAME}:18-custom",
+  ]
+
+  # For local testing. Use the registry output for multi-platform publishing.
+  platforms = ["linux/amd64"]
+  output = ["type=docker"]
+}
+```
+
+Then build by loading the upstream file from GitHub and your local override from
+the current working directory:
+
+```sh
+REPO_URL=https://github.com/sxd/postgres-distroless.git
+docker buildx bake \
+  -f docker-bake.hcl \
+  -f cwd://docker-bake.override.hcl \
+  "${REPO_URL}#main" \
+  pg-18
+```
+
+Pin a tag or commit instead of `main` for reproducible builds:
+
+```sh
+docker buildx bake \
+  -f docker-bake.hcl \
+  -f cwd://docker-bake.override.hcl \
+  "${REPO_URL}#<tag-or-commit>" \
+  pg-18
+```
+
+To change PostgreSQL capabilities, override `MESON_FLAGS` in your local file.
+Start from the upstream list and make a deliberate change:
+
+```hcl
+variable "MESON_FLAGS" {
+  default = join(" ", [
+    "-Dssl=openssl",
+    "-Dicu=enabled",
+    "-Dlz4=enabled",
+    "-Dzstd=disabled",    # example: remove zstd support
+    "-Dzlib=enabled",
+    "-Dreadline=disabled",
+    "-Dsystemd=disabled",
+    "-Dllvm=disabled",
+    "-Dnls=disabled",
+    "-Dplperl=disabled",
+    "-Dplpython=disabled",
+    "-Dpltcl=disabled",
+    "-Dpam=disabled",
+    "-Dldap=disabled",
+    "-Dgssapi=disabled",
+    "-Dlibxml=disabled",
+    "-Dlibxslt=disabled",
+    "-Dbsd_auth=disabled",
+    "-Dselinux=disabled",
+    "-Dtap_tests=disabled",
+    "-Duuid=none",
+  ])
+}
+```
+
+Disabling capabilities usually works as a Bake-only override. Enabling
+capabilities that need new OS packages, such as LDAP, PAM, GSSAPI, readline, or
+XML support, also requires changing the Dockerfile so the builder and collector
+stages install the required development and runtime libraries.
+
+When publishing, change the local target to registry output and the platforms you
+want to publish:
+
+```hcl
+target "pg-18" {
+  platforms = ["linux/amd64", "linux/arm64"]
+  output = ["type=registry"]
+}
+```
+
+Then run the same remote-build command:
+
+```sh
+REPO_URL=https://github.com/sxd/postgres-distroless.git
+REGISTRY=ghcr.io/your-user IMAGE_NAME=postgres-distroless-custom \
+docker buildx bake \
+  -f docker-bake.hcl \
+  -f cwd://docker-bake.override.hcl \
+  "${REPO_URL}#main" \
+  pg-18
+```
+
+## Test
+
+Static checks that do not need Docker:
+
+```sh
+make test-static
+```
+
+Image contract checks after a local image has been built:
+
+```sh
+make build-local
+make test-image
+```
+
+CloudNativePG integration smoke tests:
+
+```sh
+make test-cnpg
+make test-backup-core
+make test-backup-plugin
+```
+
+These tests require Docker, kind, and kubectl. The CNPG smoke scripts leave the
+kind cluster in place for inspection unless the CI cleanup step deletes it.
+
+## Test Layers
+
+- `test/check-binaries.sh` verifies the CNPG-required PostgreSQL binaries exist
+  and their dynamic dependencies resolve.
+- `test/check-no-extras.sh` verifies the image filesystem matches the per-arch
+  allowlist: `test/expected-files.txt` for amd64 and
+  `test/expected-files.arm64.txt` for arm64.
+- `test/smoke.sh` boots a one-instance CNPG cluster and runs `SELECT version()`.
+- `test/basebackup-smoke.sh` verifies core `pg_basebackup` works without a CNPG
+  backup plugin.
+- `test/backup-smoke.sh` verifies backup through the CNPG-I Barman Cloud plugin
+  and an in-cluster MinIO bucket.
+
+## Version Bumps
+
+Use `make bump-postgres MAJOR=18 VERSION=18.x` to update one PostgreSQL
+major's version and source checksum in `docker-bake.hcl`.
+
+## Notes For Maintainers
+
+Be conservative when removing files. Some apparently non-distroless pieces are
+runtime requirements:
+
+- `/bin/sh` is required by PostgreSQL tools that invoke shell commands.
+- NSS DNS/files modules are required for hostname-based access rules and
+  replication DNS.
+- tzdata is required by PostgreSQL at runtime.
+- `/etc/passwd` and `/etc/group` are required so UID/GID `26:26` resolves as
+  `postgres`.
+
+If the installed PostgreSQL tree changes, regenerate and review the filesystem
+allowlist rather than weakening `test/check-no-extras.sh`.

@@ -1,0 +1,5 @@
+# expected-files.pg16.txt — PostgreSQL 16 additions common to all arches.
+
+usr/lib/postgresql/${PG_MAJOR}/lib/adminpack.so
+usr/lib/postgresql/${PG_MAJOR}/lib/old_snapshot.so
+usr/share/postgresql/${PG_MAJOR}/fix-CVE-2024-4317.sql

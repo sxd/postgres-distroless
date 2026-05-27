@@ -1,0 +1,5 @@
+# expected-files.pg17.txt — PostgreSQL 17 additions common to all arches.
+
+usr/lib/postgresql/${PG_MAJOR}/bin/pg_combinebackup
+usr/lib/postgresql/${PG_MAJOR}/bin/pg_createsubscriber
+usr/lib/postgresql/${PG_MAJOR}/bin/pg_walsummary

@@ -1,0 +1,7 @@
+# expected-files.pg18.txt — PostgreSQL 18 additions common to all arches.
+
+usr/lib/postgresql/${PG_MAJOR}/bin/pg_combinebackup
+usr/lib/postgresql/${PG_MAJOR}/bin/pg_createsubscriber
+usr/lib/postgresql/${PG_MAJOR}/bin/pg_walsummary
+usr/lib/postgresql/${PG_MAJOR}/lib/pg_logicalinspect.so
+usr/lib/postgresql/${PG_MAJOR}/lib/pg_overexplain.so

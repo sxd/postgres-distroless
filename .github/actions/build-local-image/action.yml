@@ -1,0 +1,32 @@
+name: Build local image
+description: Build one Bake target/platform and load it into the local Docker image store.
+
+inputs:
+  target:
+    description: Bake target to build.
+    required: false
+    default: pg-18
+  platform:
+    description: Single platform to build.
+    required: false
+    default: linux/amd64
+  tag:
+    description: Local image tag to load.
+    required: false
+    default: localhost/postgres-distroless:18
+
+runs:
+  using: composite
+  steps:
+    - name: Build and load local image
+      uses: docker/bake-action@v7
+      with:
+        source: .
+        targets: ${{ inputs.target }}
+        load: true
+        set: |
+          ${{ inputs.target }}.platform=${{ inputs.platform }}
+          ${{ inputs.target }}.output=type=docker
+          ${{ inputs.target }}.tags=${{ inputs.tag }}
+          ${{ inputs.target }}.cache-from=type=gha
+          ${{ inputs.target }}.cache-to=type=gha,mode=max

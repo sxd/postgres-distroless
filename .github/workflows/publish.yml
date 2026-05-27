@@ -1,0 +1,43 @@
+name: Publish
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+  packages: write
+  actions: read
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: PostgreSQL ${{ matrix.pg_major }} publish
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - pg_major: "16"
+            target: pg-16
+          - pg_major: "17"
+            target: pg-17
+          - pg_major: "18"
+            target: pg-18
+    uses: ./.github/workflows/publish-version.yml
+    permissions:
+      contents: read
+      id-token: write
+      packages: write
+      actions: read
+    with:
+      pg_major: ${{ matrix.pg_major }}
+      target: ${{ matrix.target }}
+    secrets: inherit

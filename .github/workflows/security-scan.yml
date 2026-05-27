@@ -1,0 +1,62 @@
+name: Security Scan
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+  schedule:
+    - cron: "17 4 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-scan-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  OCI_SOURCE: https://github.com/${{ github.repository }}
+  OCI_REVISION: ${{ github.sha }}
+
+jobs:
+  grype:
+    name: PostgreSQL ${{ matrix.pg_major }} Grype image scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - pg_major: "16"
+            target: pg-16
+            image: localhost/postgres-distroless:16
+          - pg_major: "17"
+            target: pg-17
+            image: localhost/postgres-distroless:17
+          - pg_major: "18"
+            target: pg-18
+            image: localhost/postgres-distroless:18
+    env:
+      PG_MAJOR: ${{ matrix.pg_major }}
+      IMAGE: ${{ matrix.image }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build local scan image
+        uses: ./.github/actions/build-local-image
+        with:
+          target: ${{ matrix.target }}
+          platform: linux/amd64
+          tag: ${{ env.IMAGE }}
+
+      - name: Scan image with Grype
+        uses: ./.github/actions/grype-scan-image
+        with:
+          image: ${{ env.IMAGE }}

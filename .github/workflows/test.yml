@@ -1,0 +1,106 @@
+name: Test
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  KIND_VERSION: v0.31.0
+  KUBECTL_VERSION: v1.36.1
+  CNPG_VERSION: 1.29.0
+  OCI_SOURCE: https://github.com/${{ github.repository }}
+  OCI_REVISION: ${{ github.sha }}
+
+jobs:
+  integration:
+    name: PostgreSQL ${{ matrix.pg_major }} image and CNPG tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - pg_major: "16"
+            target: pg-16
+            image: localhost/postgres-distroless:16
+          - pg_major: "17"
+            target: pg-17
+            image: localhost/postgres-distroless:17
+          - pg_major: "18"
+            target: pg-18
+            image: localhost/postgres-distroless:18
+    env:
+      PG_MAJOR: ${{ matrix.pg_major }}
+      IMAGE: ${{ matrix.image }}
+      KIND_CLUSTER: pg-distroless-${{ matrix.pg_major }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build test image
+        uses: ./.github/actions/build-local-image
+        with:
+          target: ${{ matrix.target }}
+          platform: linux/amd64
+          tag: ${{ env.IMAGE }}
+
+      - name: Check required binaries
+        run: ./test/check-binaries.sh "${IMAGE}"
+
+      - name: Check filesystem allowlist
+        run: ./test/check-no-extras.sh "${IMAGE}"
+
+      - name: Scan image with Grype
+        uses: ./.github/actions/grype-scan-image
+        with:
+          image: ${{ env.IMAGE }}
+
+      - name: Install kind and kubectl
+        run: |
+          set -euo pipefail
+          mkdir -p "${HOME}/.local/bin"
+          curl -fsSLo "${HOME}/.local/bin/kind" \
+            "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-amd64"
+          curl -fsSLo "${HOME}/.local/bin/kubectl" \
+            "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+          chmod 0755 "${HOME}/.local/bin/kind" "${HOME}/.local/bin/kubectl"
+          echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
+          kind version
+          kubectl version --client=true
+
+      - name: CNPG smoke
+        run: ./test/smoke.sh
+
+      - name: Backup without plugin
+        run: ./test/basebackup-smoke.sh
+
+      - name: Backup with Barman Cloud plugin
+        run: ./test/backup-smoke.sh
+
+      - name: Dump Kubernetes state on failure
+        if: failure()
+        run: |
+          kubectl get all -A -o wide || true
+          kubectl get clusters.postgresql.cnpg.io -A -o wide || true
+          kubectl get backups.postgresql.cnpg.io -A -o wide || true
+          kubectl get objectstores.barmancloud.cnpg.io -A -o wide || true
+          kubectl describe clusters.postgresql.cnpg.io -A || true
+          kubectl describe backups.postgresql.cnpg.io -A || true
+
+      - name: Delete kind cluster
+        if: always()
+        run: kind delete cluster --name "${KIND_CLUSTER}" || true

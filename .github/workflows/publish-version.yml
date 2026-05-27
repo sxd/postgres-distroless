@@ -1,0 +1,182 @@
+name: Publish Version
+
+on:
+  workflow_call:
+    inputs:
+      pg_major:
+        description: PostgreSQL major version.
+        required: true
+        type: string
+      target:
+        description: Docker Bake target to publish.
+        required: true
+        type: string
+    outputs:
+      image:
+        description: Published image repository.
+        value: ${{ jobs.ghcr.outputs.image }}
+      digest:
+        description: Published image digest.
+        value: ${{ jobs.ghcr.outputs.digest }}
+
+permissions:
+  actions: read
+  contents: read
+  id-token: write
+  packages: write
+
+env:
+  IMAGE_NAME: postgres-distroless
+  SUPPORTED_PLATFORMS: linux/amd64 linux/arm64
+  OCI_SOURCE: https://github.com/${{ github.repository }}
+  OCI_REVISION: ${{ github.sha }}
+  PG_MAJOR: ${{ inputs.pg_major }}
+  BAKE_TARGET: ${{ inputs.target }}
+
+jobs:
+  ghcr:
+    name: PostgreSQL ${{ inputs.pg_major }} build and publish to GHCR
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    outputs:
+      image: ${{ steps.image-metadata.outputs.image }}
+      digest: ${{ steps.image-metadata.outputs.digest }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set registry namespace
+        run: echo "REGISTRY=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}" >> "${GITHUB_ENV}"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+        with:
+          platforms: arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Build and push multi-platform manifests
+        id: publish
+        uses: docker/bake-action@v7
+        with:
+          source: .
+          targets: ${{ env.BAKE_TARGET }}
+          push: true
+          provenance: mode=max
+          sbom: true
+          set: |
+            ${{ env.BAKE_TARGET }}.output=type=registry
+            ${{ env.BAKE_TARGET }}.cache-from=type=gha
+            ${{ env.BAKE_TARGET }}.cache-to=type=gha,mode=max
+
+      - name: Extract published image digest
+        id: image-metadata
+        env:
+          METADATA: ${{ steps.publish.outputs.metadata }}
+        run: |
+          set -euo pipefail
+
+          image="${REGISTRY}/${IMAGE_NAME}"
+          digest="$(jq -r --arg target "${BAKE_TARGET}" '.[$target]["containerimage.digest"] // empty' <<< "${METADATA}")"
+          if [ -z "${digest}" ]; then
+            echo "Unable to find containerimage.digest for ${BAKE_TARGET} in bake metadata" >&2
+            printf '%s\n' "${METADATA}" >&2
+            exit 1
+          fi
+
+          echo "image=${image}" >> "${GITHUB_OUTPUT}"
+          echo "digest=${digest}" >> "${GITHUB_OUTPUT}"
+          echo "Published ${image}@${digest}"
+
+      - name: Set up Cosign
+        uses: sigstore/cosign-installer@v4.1.2
+
+      - name: Sign published image
+        env:
+          IMAGE: ${{ steps.image-metadata.outputs.image }}
+          DIGEST: ${{ steps.image-metadata.outputs.digest }}
+        run: |
+          set -euo pipefail
+          cosign sign --yes "${IMAGE}@${DIGEST}"
+
+      - name: Verify Cosign signature
+        env:
+          IMAGE: ${{ steps.image-metadata.outputs.image }}
+          DIGEST: ${{ steps.image-metadata.outputs.digest }}
+        run: scripts/verify-cosign-signature.sh "${IMAGE}@${DIGEST}"
+
+      - name: Verify BuildKit SBOM and provenance attestations
+        env:
+          IMAGE: ${{ steps.image-metadata.outputs.image }}
+          DIGEST: ${{ steps.image-metadata.outputs.digest }}
+        run: scripts/verify-buildkit-attestations.sh "${IMAGE}@${DIGEST}"
+
+      - name: Verify published manifest lists
+        run: |
+          set -euo pipefail
+
+          docker buildx bake "${BAKE_TARGET}" --print \
+            --set "${BAKE_TARGET}.output=type=registry" \
+            | jq -r --arg target "${BAKE_TARGET}" '.target[$target].tags[]' \
+            | while read -r tag; do
+                echo ">> inspecting ${tag}"
+                docker buildx imagetools inspect "${tag}" | tee manifest.txt
+                for platform in ${SUPPORTED_PLATFORMS}; do
+                  grep -q "Platform:.*${platform}" manifest.txt
+                done
+              done
+
+  slsa:
+    name: PostgreSQL ${{ inputs.pg_major }} SLSA provenance
+    needs: ghcr
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+      packages: write
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v2.1.0
+    with:
+      image: ${{ needs.ghcr.outputs.image }}
+      digest: ${{ needs.ghcr.outputs.digest }}
+      registry-username: ${{ github.actor }}
+    secrets:
+      registry-password: ${{ secrets.GITHUB_TOKEN }}
+
+  verify-slsa:
+    name: PostgreSQL ${{ inputs.pg_major }} verify SLSA provenance
+    needs:
+      - ghcr
+      - slsa
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: read
+
+    steps:
+      - name: Set up SLSA verifier
+        uses: slsa-framework/slsa-verifier/actions/installer@v2.7.1
+
+      - name: Verify image provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+          IMAGE: ${{ needs.ghcr.outputs.image }}
+          DIGEST: ${{ needs.ghcr.outputs.digest }}
+          BUILDER_ID: https://github.com/slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@refs/tags/v2.1.0
+        run: |
+          set -euo pipefail
+
+          slsa-verifier verify-image "${IMAGE}@${DIGEST}" \
+            --source-uri "github.com/${GITHUB_REPOSITORY}" \
+            --source-branch main \
+            --builder-id "${BUILDER_ID}"

@@ -1,0 +1,57 @@
+name: Build
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  OCI_SOURCE: https://github.com/${{ github.repository }}
+  OCI_REVISION: ${{ github.sha }}
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  image:
+    name: Build PostgreSQL ${{ matrix.pg_major }} multi-platform image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - pg_major: "16"
+            target: pg-16
+          - pg_major: "17"
+            target: pg-17
+          - pg_major: "18"
+            target: pg-18
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+        with:
+          platforms: arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build all supported platforms
+        uses: docker/bake-action@v7
+        with:
+          source: .
+          targets: ${{ matrix.target }}
+          set: |
+            ${{ matrix.target }}.output=type=cacheonly
+            ${{ matrix.target }}.cache-from=type=gha
+            ${{ matrix.target }}.cache-to=type=gha,mode=max
